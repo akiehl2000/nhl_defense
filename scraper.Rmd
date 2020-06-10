@@ -1,0 +1,131 @@
+---
+title: "NHL Defense Sports Reference Scraper"
+author: "Adam Kiehl"
+date: "6/8/20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+library(tidyverse)
+library(rvest)
+library(RCurl)
+library(janitor)
+library(lubridate)
+```
+
+## Variable Setup
+```{r}
+years <- c('1999', '2000', '2001', '2002', '2003', '2004', '2006', '2007', '2008', '2009', '2010', '2011', '2012', '2013', '2014', 
+           '2015', '2016', '2017', '2018', '2019')
+franchises <- c('ANA', 'PHX', 'BOS', 'BUF', 'CGY', 'CAR', 'CHI', 'COL', 'CBJ', 'DAL', 'DET', 'EDM', 'FLA', 'LAK', 'MIN', 'MTL', 
+                'NSH', 'NJD', 'NYI', 'NYR', 'OTT', 'PHI', 'PIT', 'SJS', 'STL', 'TBL', 'TOR', 'VAN', 'VEG', 'WSH', 'WPG')
+base_url <- function(franchises, years) str_c(franchises, '/', years)
+map = invoke_map(base_url, franchises, years)
+```
+
+```{r}
+skaters_header <- c('Player', 'Pos', 'G', 'A', '+/-', 'TOI')
+goalies_header <- c('Player', 'SA', 'MIN')
+teams_header <- c('Team', 'GP', 'W', 'OW', 'OL', 'G', 'GA')
+```
+
+```{r}
+headers <- list()
+headers[['skaters_playoffs']] <- c('rank', 'player', 'age', 'pos', 'games', 'goals', 'assists', 'points', 'plus.minus', 'penalty.mins',
+                                   'even.goals','pp.goals', 'pk.goals', 'gw.goals', 'even.assists', 'pp.assists', 'pk.assists', 'shots',
+                                   'shot.percentage', 'toi', 'avg.toi')
+headers[['goalies_playoffs']] <- c('rank', 'player', 'age', 'games', 'starts', 'wins', 'losses', 'ties', 'goals', 'shots', 'saves', 
+                                   'save.percentage', 'avg.goals', 'shutouts', 'mins', 'quality.starts', 'quality.start.percentage', 
+                                   'really.bad.starts', 'goals.allowed.percentage', 'goals.saved.above.average')
+headers[['teams']] <- c('rank', 'team', 'games', 'wins', 'losses', 'ties', 'ot.wins', 'ot.losses', 'win.percentage', 'goals', 
+                        'goals.against', 'differential')
+```
+
+## Function Setup
+```{r}
+url.extract <- function(tds) {
+  results <- c()
+  for(td in tds) {
+    children <- html_children(td)
+    if (length(children) == 0) {
+      results <- c(results, NA)
+    } else{
+      results <- c(results, (html_attr(html_children(td), 'href')))
+    }
+  }
+  results
+}
+```
+
+```{r}
+parse_playoff_tables <- function(tables) {
+  results = list()
+  for (tbl in tables) {
+    id <- html_attr(tbl, 'id')
+    if (id %in% names(headers)) {
+      df <- html_table(tbl) %>%
+        as_tibble(.name_repair = 'universal') %>%
+        tail(-1)
+      if(ncol(df) == length(headers[[id]])) {
+        colnames(df) <- headers[[id]]
+      } else {
+        next;
+      }
+      melted <- df %>%
+        gather(stat, value) %>%
+        mutate(stat = as.character(stat)) %>%
+        filter(value != '') %>%
+        mutate(value = as.numeric(value),
+               section = id)
+      results[[id]] <- melted
+    }
+  }
+  bind_rows(results)
+}
+```
+
+## Scraping Hockey Reference:
+```{r}
+if(!file.exists('./data/playoffs.rds')){
+  draft.table <- data_frame(year = years) %>%
+    group_by(year) %>% 
+    do({
+      url <- paste('https://www.hockey-reference.com/playoffs/NHL_', .$year, '.html', sep ='')
+      doc <- read_html(url)
+      html.table <- doc %>%
+        html_nodes('table') %>%
+        parse_playoff_tables(.)
+      urls <- html.table %>%
+        html_nodes('tr td:nth-child(29)') %>%
+        url.extract(.)
+      my.table <- html_table(html.table)
+      colnames(my.table) <- headers[['teams']]
+      my.table <- my.table %>%
+        mutate(url = urls) %>%
+        mutate(year = year)
+      my.table
+    }) %>%
+    ungroup(.)
+  write_rds(draft.table, './data/playoffs.rds', compress = 'xz')
+}
+```
+
+## Importing and Formatting Data:
+```{r}
+playoff_teams <- read_rds('./data/playoffs.rds') %>%
+  mutate(., url = if_else(str_sub(url, 1, 5) == 'http:',
+                          str_c('https:', str_sub(url, 6, -1)),
+                          url),
+         key = ifelse(is.na(url),
+                      year,
+                      url)) %>%
+  convert(., num(rank, year, games, wins, losses, ties, ot.wins, ot.losses, win.percentage, goals, goals.against, differential)) %>%
+  arrange(., year, wins, goals) %>%
+  select(., key, year, team, games, wins, ot.wins, ot.losses, goals, goals.against) %>%
+  mutate_if(., is.character, str_trim)
+```
+
+
